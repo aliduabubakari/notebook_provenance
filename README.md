@@ -1440,28 +1440,6 @@ notebook-provenance compare-runs results/run_1.json results/run_2.json
 - For compliance: Deploy local LLM (Ollama, vLLM)
 - For production: Review all LLM prompts before use
 
----
-
-## Citation
-
-If you use this system in your research, please cite:
-
-```bibtex
-@software{notebook_provenance_2024,
-  author = {Your Name},
-  title = {Notebook Provenance Analysis System: Hybrid LLM-Embedding Approach for Automated Data Provenance Extraction},
-  year = {2024},
-  version = {0.2.0},
-  url = {https://github.com/yourusername/notebook-provenance}
-}
-
-@article{your_paper_2024,
-  author = {Your Name and Co-authors},
-  title = {Hybrid LLM-Embedding Classification for Generalizable Notebook Provenance Extraction},
-  journal = {Conference/Journal Name},
-  year = {2024},
-  note = {Under submission}
-}
 ```
 
 ### Related Publications
@@ -1518,7 +1496,7 @@ MIT License - See `LICENSE` file
 
 - **Issues**: GitHub Issues
 - **Discussions**: GitHub Discussions
-- **Email**: your.email@university.edu
+- **Email**: a.alidu@campus.unimib.it
 - **Documentation**: https://notebook-provenance.readthedocs.io
 
 ---
@@ -1536,13 +1514,3 @@ MIT License - See `LICENSE` file
 **Last Updated**: January 2024  
 **Status**: Active Development  
 **Paper Status**: Under Submission
-
----
-
-This README serves as the foundation for the full research paper. Key sections to expand for publication:
-
-1. **Related Work** → Full literature review (2-3 pages)
-2. **Methodology** → Detailed algorithms with pseudocode
-3. **Evaluation** → Extended experiments, ablation studies
-4. **Discussion** → Deeper analysis of results, implications
-5. **Appendix** → Full evaluation protocol, annotation guidelines
