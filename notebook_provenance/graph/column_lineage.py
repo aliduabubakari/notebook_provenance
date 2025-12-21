@@ -64,12 +64,14 @@ class ColumnLineageTracker:
             r"([A-Za-z_]\w*)\s*\[\s*['\"]([^'\"]+)['\"]\s*\]\s*\.\s*(?:apply|map|transform)"
         )
     
-    def extract_column_lineage(self, parsed_cells: List[ParsedCell]) -> Dict[str, Dict[str, Any]]:
+    def extract_column_lineage(self, parsed_cells) -> Dict[str, Dict[str, Any]]:
         """
         Extract column-level lineage from parsed cells.
         
+        FIXED: Now handles both ParsedCell objects and dictionaries.
+        
         Args:
-            parsed_cells: List of ParsedCell objects
+            parsed_cells: List of ParsedCell objects OR dictionaries
             
         Returns:
             Dictionary with keys:
@@ -86,11 +88,18 @@ class ColumnLineageTracker:
         }
         
         for cell in parsed_cells:
-            if cell.error:
-                continue
-            
-            code = cell.code
-            cell_id = cell.cell_id
+            # Handle both ParsedCell objects and dictionaries
+            if isinstance(cell, dict):
+                if cell.get('error'):
+                    continue
+                code = cell.get('code', '')
+                cell_id = cell.get('cell_id', '')
+            else:
+                # It's a ParsedCell object
+                if cell.error:
+                    continue
+                code = cell.code
+                cell_id = cell.cell_id
             
             # Track column creation: df['new_col'] = ...
             for match in self.create_pat.finditer(code):

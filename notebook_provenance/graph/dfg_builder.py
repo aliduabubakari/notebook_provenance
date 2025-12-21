@@ -156,30 +156,34 @@ class SmartDFGBuilder:
         self.global_scope.update(cell_scope)
     
     def _process_assignment(self, assign_node: ast.Assign, cell_id: str, 
-                           code: str, cell_scope: Dict) -> None:
+                       code: str, cell_scope: Dict) -> None:
         """
-        Process regular assignment statement.
-        
-        Args:
-            assign_node: AST Assign node
-            cell_id: Current cell ID
-            code: Source code
-            cell_scope: Current cell's scope
+        Process assignment WITH function tracking.
         """
         for target in assign_node.targets:
             if isinstance(target, ast.Name):
                 var_name = target.id
                 
-                # Process right-hand side
+                # Process right-hand side and track if it's a function call
                 value_node = self._process_expression(
                     assign_node.value, cell_id, code, cell_scope
                 )
                 
-                # Create variable node
+                # Check if value is a function call
+                creating_function = None
+                if isinstance(assign_node.value, ast.Call):
+                    func_name = self._extract_function_name(assign_node.value)
+                    creating_function = func_name
+                
+                # Create variable node WITH metadata
                 var_node = self._create_variable_node(
                     var_name, cell_id, code, 
                     getattr(assign_node, 'lineno', 0)
                 )
+                
+                # ADD: Store creating function in metadata
+                if creating_function:
+                    var_node.metadata['created_by'] = creating_function
                 
                 # Add edge from value to variable
                 if value_node and value_node.id != var_node.id:
@@ -187,20 +191,15 @@ class SmartDFGBuilder:
                         from_node=value_node.id,
                         to_node=var_node.id,
                         edge_type=EdgeType.DATA_FLOW,
-                        operation="assign"
+                        operation=creating_function or "assign",
+                        metadata={'creating_function': creating_function} if creating_function else {}
                     )
                     self.dfg.add_edge(edge)
                 
                 # Update scopes
                 cell_scope[var_name] = var_node
                 self.variable_to_node[var_name] = var_node
-            
-            elif isinstance(target, (ast.Tuple, ast.List)):
-                # Handle tuple unpacking
-                self._process_tuple_assignment(
-                    target, assign_node.value, cell_id, code, cell_scope
-                )
-    
+
     def _process_aug_assignment(self, aug_assign_node: ast.AugAssign, 
                                cell_id: str, code: str, cell_scope: Dict) -> None:
         """
@@ -777,6 +776,120 @@ class SmartDFGBuilder:
                 clean_dfg.add_edge(edge)
         
         return clean_dfg
+    
+    def _process_cell(self, cell: 'ParsedCell') -> None:
+        """
+        Process a cell and build graph nodes/edges.
+        
+        FIXED: Better tracking of function calls and their results.
+        """
+        cell_id = cell.cell_id
+        cell_scope = {}
+        
+        # Track function call results for this cell
+        self._current_cell_function_results = {}
+        
+        if cell.ast_tree:
+            for stmt in cell.ast_tree.body:
+                self._process_statement(stmt, cell_id, cell.code, cell_scope)
+        
+        # Update global scope
+        self.global_scope.update(cell_scope)
+
+    def _process_statement(self, stmt, cell_id: str, code: str, cell_scope: Dict) -> None:
+        """Process a single statement."""
+        import ast
+        
+        if isinstance(stmt, ast.Assign):
+            self._process_assignment(stmt, cell_id, code, cell_scope)
+        elif isinstance(stmt, ast.AugAssign):
+            self._process_aug_assignment(stmt, cell_id, code, cell_scope)
+        elif isinstance(stmt, ast.AnnAssign):
+            self._process_ann_assignment(stmt, cell_id, code, cell_scope)
+        elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            self._process_standalone_call(stmt.value, cell_id, code, cell_scope)
+        elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            self._process_import(stmt, cell_id, cell_scope)
+        elif isinstance(stmt, ast.Try):
+            # Process try block contents
+            for try_stmt in stmt.body:
+                self._process_statement(try_stmt, cell_id, code, cell_scope)
+        elif isinstance(stmt, (ast.For, ast.While)):
+            # Process loop body
+            for loop_stmt in stmt.body:
+                self._process_statement(loop_stmt, cell_id, code, cell_scope)
+        elif isinstance(stmt, ast.If):
+            # Process if body
+            for if_stmt in stmt.body:
+                self._process_statement(if_stmt, cell_id, code, cell_scope)
+
+    def should_include_node(self, node: 'DFGNode') -> bool:
+        """
+        Decide if node should be in cleaned graph.
+        
+        FIXED: More aggressive filtering of configuration noise.
+        """
+        label_lower = node.label.lower()
+        
+        # Expanded noise patterns - exclude configuration/setup
+        noise_patterns = [
+            # Authentication/credentials
+            'manager', 'client', 'handler', 'service', 'provider',
+            'auth', 'token', 'password', 'username', 'credential', 'api_key',
+            # Configuration
+            'config', 'setting', 'option', 'url', 'uri', 'endpoint', 'base_url', 'api_url',
+            # User input
+            'input', 'prompt', 'default', 'getpass',
+            # Utilities
+            'utility', 'util', 'helper',
+            # Messages
+            'message', 'success', 'error', 'warning',
+        ]
+        
+        # Check noise patterns
+        for pattern in noise_patterns:
+            if pattern in label_lower:
+                # Exception: keep if it's clearly data (table_data, etc.)
+                if any(data_word in label_lower for data_word in ['data', 'table', 'df', 'result', 'payload']):
+                    if 'table_data' in label_lower or 'reconciled' in label_lower or 'extended' in label_lower:
+                        return True
+                return False
+        
+        # Always include data artifacts
+        if node.node_type == NodeType.DATA_ARTIFACT:
+            return True
+        
+        # Include important function calls
+        if node.node_type == NodeType.FUNCTION_CALL:
+            important_functions = [
+                'read_csv', 'read_excel', 'read_json', 'read_parquet',
+                'add_table', 'get_table', 'create_table',
+                'reconcile', 'extend', 'extend_column',
+                'merge', 'join', 'filter', 'aggregate',
+                'fit', 'predict', 'transform',
+                'save', 'to_csv', 'to_parquet', 'push_to_backend',
+                'display', 'show',
+            ]
+            if any(func in label_lower for func in important_functions):
+                return True
+            return False
+        
+        # Include variables that look like data
+        if node.node_type == NodeType.VARIABLE:
+            data_patterns = ['df', 'data', 'table', 'result', 'payload', 'reconciled', 'extended']
+            if any(pattern in label_lower for pattern in data_patterns):
+                return True
+            # Exclude other variables
+            return False
+        
+        # Include intermediates only if they're data-related
+        if node.node_type == NodeType.INTERMEDIATE:
+            data_patterns = ['table', 'data', 'result', 'payload']
+            if any(pattern in label_lower for pattern in data_patterns):
+                return True
+            return False
+        
+        return False
 
 
 __all__ = [

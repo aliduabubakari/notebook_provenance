@@ -1,16 +1,9 @@
 """
-Artifact Analyzer Module
-========================
-
-Analyze and track data artifacts with importance scoring.
-
-This module provides the DataArtifactAnalyzer class which:
-- Identifies key data artifacts in the graph
-- Computes importance scores
-- Builds artifact lineage graphs
+Artifact Analyzer Module - Updated with Hybrid Classifier
+==========================================================
 """
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 from collections import defaultdict
 import networkx as nx
 
@@ -21,270 +14,150 @@ from notebook_provenance.core.data_structures import (
     CellDependency,
 )
 from notebook_provenance.core.enums import NodeType
+from notebook_provenance.semantic.artifact_classifier import (
+    HybridArtifactClassifier,
+    ArtifactClassification,
+)
 
 
 class DataArtifactAnalyzer:
     """
-    Analyze and track data artifacts with importance scoring.
-    
-    This class identifies important data objects (DataFrames, tables, models, etc.)
-    and computes their importance based on usage patterns and connectivity.
-    
-    Example:
-        >>> analyzer = DataArtifactAnalyzer()
-        >>> artifacts = analyzer.identify_artifacts(dfg, cell_dependencies)
-        >>> lineage_graph = analyzer.build_artifact_lineage(dfg, artifacts)
+    Analyze and track data artifacts using hybrid LLM + embedding classification.
     """
     
-    def __init__(self, llm_analyzer=None):
+    def __init__(self, llm_analyzer=None, use_embeddings: bool = True):
         """
-        Initialize the artifact analyzer.
+        Initialize analyzer with hybrid classifier.
         
         Args:
-            llm_analyzer: Optional LLM analyzer for enhanced descriptions
+            llm_analyzer: LLM analyzer for semantic understanding
+            use_embeddings: Whether to use embedding-based similarity
         """
         self.llm_analyzer = llm_analyzer
+        self.hybrid_classifier = HybridArtifactClassifier(
+            llm_analyzer=llm_analyzer,
+            use_embeddings=use_embeddings
+        )
         self.artifacts = {}
-        
-        # Patterns for identifying artifacts
-        self.artifact_patterns = {
-            'dataframe': {
-                'names': ['df', 'data', 'dataset', '_df', '_data'],
-                'functions': ['read_csv', 'DataFrame', 'read_excel', 'read_parquet'],
-                'base_importance': 10
-            },
-            'table': {
-                'names': ['table', 'tbl', '_table'],
-                'functions': ['add_table', 'get_table', 'create_table'],
-                'base_importance': 10
-            },
-            'model': {
-                'names': ['model', 'classifier', 'regressor', 'estimator'],
-                'functions': ['fit', 'train', 'compile'],
-                'base_importance': 9
-            },
-            'result': {
-                'names': ['result', 'output', 'prediction', 'predictions', 'score'],
-                'functions': ['predict', 'transform', 'score'],
-                'base_importance': 7
-            },
-            'matrix': {
-                'names': ['matrix', 'array', 'tensor', 'X', 'y'],
-                'functions': ['array', 'tensor', 'matrix'],
-                'base_importance': 8
-            },
-        }
+        self.classifications = {}
     
     def identify_artifacts(self, dfg: DataFlowGraph, 
-                          cell_dependencies: Dict[str, CellDependency]) -> List[DataArtifact]:
+                      cell_dependencies: Dict[str, CellDependency],
+                      code_cells: Optional[Dict[str, str]] = None,
+                      max_llm_calls: int = 15) -> List[DataArtifact]:
         """
-        Identify key data artifacts in the graph.
-        
-        Args:
-            dfg: Data flow graph
-            cell_dependencies: Cell dependency information
-            
-        Returns:
-            List of DataArtifact objects sorted by importance
+        Identify artifacts with FIXED deduplication.
         """
         artifacts = []
+        seen_names = set()  # Track by NAME, not node_id
         
-        for node_id, node in dfg.nodes.items():
-            # Only consider variables and data artifacts
-            if node.node_type not in [NodeType.VARIABLE, NodeType.DATA_ARTIFACT]:
+        # Get code context
+        code_context = code_cells or {}
+        
+        # Filter to relevant nodes
+        relevant_nodes = [
+            (node_id, node) for node_id, node in dfg.nodes.items()
+            if node.node_type in [NodeType.VARIABLE, NodeType.DATA_ARTIFACT]
+        ]
+        
+        print(f"  Classifying {len(relevant_nodes)} nodes...")
+        
+        # Group by name FIRST
+        by_name = {}
+        for node_id, node in relevant_nodes:
+            name = node.label
+            if name not in by_name:
+                by_name[name] = []
+            by_name[name].append((node_id, node))
+        
+        print(f"  Found {len(by_name)} unique variable names")
+        
+        # Classify each unique name only ONCE
+        for var_name, node_list in by_name.items():
+            # Use first occurrence (usually the definition)
+            node_id, node = node_list[0]
+            
+            # Get context
+            cell_code = code_context.get(node.cell_id, "")
+            function_calls = self._get_related_functions(dfg, node_id)
+            
+            # Classify
+            try:
+                classification = self.hybrid_classifier.classify(
+                    node=node,
+                    code_context=cell_code,
+                    function_calls=function_calls
+                )
+            except Exception as e:
+                print(f"  ⚠ Classification failed for '{var_name}': {e}")
+                classification = ArtifactClassification(
+                    category='utility',
+                    importance=3.0,
+                    confidence=0.3,
+                    reasoning='Classification failed',
+                    source='fallback'
+                )
+            
+            self.classifications[node_id] = classification
+            
+            # Filter: only keep core_data and important payloads
+            if classification.category not in ['core_data', 'payload']:
                 continue
             
-            # Calculate importance score
-            artifact_type, importance = self._calculate_importance(node, dfg)
+            if classification.importance < 5:
+                continue
             
-            # Threshold for important artifacts
-            if importance >= 7:
-                # Find which cell created this
-                created_in_cell = node.cell_id or "unknown"
-                
-                artifact = DataArtifact(
-                    id=node_id,
-                    name=node.label,
-                    type=artifact_type,
-                    created_in_cell=created_in_cell,
-                    importance_score=importance,
-                    metadata={
-                        'node_type': node.node_type.value,
-                        'code_snippet': node.code_snippet,
-                        'line_number': node.line_number
-                    }
-                )
-                
-                artifacts.append(artifact)
-                self.artifacts[node_id] = artifact
+            # Create artifact (ONCE per unique name)
+            artifact = DataArtifact(
+                id=node_id,
+                name=var_name,
+                type=classification.semantic_type or classification.category,
+                created_in_cell=node.cell_id or "unknown",
+                importance_score=classification.importance * classification.confidence * 5,
+                metadata={
+                    'category': classification.category,
+                    'classification_source': classification.source,
+                    'confidence': classification.confidence,
+                    'reasoning': classification.reasoning,
+                    'created_by': node.metadata.get('created_by'),  # ADD THIS
+                    'occurrences': len(node_list),
+                    'all_node_ids': [nid for nid, _ in node_list]
+                }
+            )
+            
+            artifacts.append(artifact)
+            self.artifacts[node_id] = artifact
+        
+        print(f"  ✓ Classification complete: {len(artifacts)} unique artifacts")
         
         # Sort by importance
         artifacts.sort(key=lambda x: x.importance_score, reverse=True)
         
         return artifacts
-    
-    def _calculate_importance(self, node: DFGNode, dfg: DataFlowGraph) -> Tuple[str, float]:
-        """
-        Calculate artifact importance score.
+
+    def _get_related_functions(self, dfg: DataFlowGraph, node_id: str) -> List[str]:
+        """Get function calls related to a node."""
+        functions = []
         
-        Importance is based on:
-        - Name patterns matching known artifact types
-        - Connectivity (incoming/outgoing edges)
-        - Involvement in important operations
-        
-        Args:
-            node: DFGNode to score
-            dfg: Data flow graph
-            
-        Returns:
-            Tuple of (artifact_type, importance_score)
-        """
-        score = 0.0
-        artifact_type = 'unknown'
-        
-        # Check name patterns
-        for atype, config in self.artifact_patterns.items():
-            for pattern in config['names']:
-                if pattern.lower() in node.label.lower():
-                    score += config['base_importance']
-                    artifact_type = atype
-                    break
-            if artifact_type != 'unknown':
-                break
-        
-        # Check if involved in important operations
+        # Check incoming edges (what created this)
         for edge in dfg.edges:
-            if edge.from_node == node.id or edge.to_node == node.id:
-                score += 0.5
-                
-                # Bonus for specific operation types
-                if edge.operation:
-                    important_ops = ['read', 'load', 'save', 'fit', 'transform']
-                    if any(op in edge.operation.lower() for op in important_ops):
-                        score += 1.0
+            if edge.to_node == node_id:
+                source = dfg.get_node(edge.from_node)
+                if source and source.node_type == NodeType.FUNCTION_CALL:
+                    functions.append(source.label)
         
-        # Connectivity bonus
-        incoming_edges = sum(1 for e in dfg.edges if e.to_node == node.id)
-        outgoing_edges = sum(1 for e in dfg.edges if e.from_node == node.id)
-        
-        # Heavily used artifacts are important
-        score += incoming_edges * 1.5  # Being produced by many operations
-        score += outgoing_edges * 2.0  # Being consumed by many operations
-        
-        # Cap the score
-        score = min(score, 100.0)
-        
-        return artifact_type, score
-    
-    def build_artifact_lineage(self, dfg: DataFlowGraph, 
-                               artifacts: List[DataArtifact]) -> nx.DiGraph:
-        """
-        Build lineage graph showing artifact transformations.
-        
-        Args:
-            dfg: Data flow graph
-            artifacts: List of identified artifacts
-            
-        Returns:
-            NetworkX DiGraph of artifact lineage
-        """
-        G = nx.DiGraph()
-        
-        # Add artifact nodes
-        for artifact in artifacts:
-            G.add_node(
-                artifact.id,
-                name=artifact.name,
-                type=artifact.type,
-                cell=artifact.created_in_cell,
-                importance=artifact.importance_score
-            )
-        
-        # Find transformations between artifacts
-        artifact_ids = {a.id for a in artifacts}
-        
+        # Check outgoing edges (what this is passed to)
         for edge in dfg.edges:
-            if edge.from_node in artifact_ids and edge.to_node in artifact_ids:
-                # Find the operation between them
-                operation = self._find_operation_between(dfg, edge.from_node, edge.to_node)
-                
-                G.add_edge(
-                    edge.from_node,
-                    edge.to_node,
-                    operation=operation,
-                    edge_type=edge.edge_type.value
-                )
+            if edge.from_node == node_id:
+                target = dfg.get_node(edge.to_node)
+                if target and target.node_type == NodeType.FUNCTION_CALL:
+                    functions.append(target.label)
         
-        return G
+        return functions
     
-    def _find_operation_between(self, dfg: DataFlowGraph, 
-                               from_id: str, to_id: str) -> str:
-        """
-        Find operation that transforms one artifact to another.
-        
-        Args:
-            dfg: Data flow graph
-            from_id: Source artifact ID
-            to_id: Target artifact ID
-            
-        Returns:
-            Operation name
-        """
-        # Look for intermediate function calls
-        for edge in dfg.edges:
-            if edge.from_node == from_id:
-                intermediate = dfg.nodes.get(edge.to_node)
-                if intermediate and intermediate.node_type == NodeType.FUNCTION_CALL:
-                    # Check if this intermediate leads to target
-                    for edge2 in dfg.edges:
-                        if edge2.from_node == intermediate.id and edge2.to_node == to_id:
-                            return intermediate.label
-        
-        return "transform"
-    
-    def get_artifact_by_name(self, name: str) -> Optional[DataArtifact]:
-        """
-        Get artifact by name.
-        
-        Args:
-            name: Artifact name
-            
-        Returns:
-            DataArtifact or None
-        """
-        for artifact in self.artifacts.values():
-            if artifact.name == name:
-                return artifact
-        return None
-    
-    def get_artifact_stats(self, artifacts: List[DataArtifact]) -> Dict:
-        """
-        Get statistics about identified artifacts.
-        
-        Args:
-            artifacts: List of artifacts
-            
-        Returns:
-            Dictionary of statistics
-        """
-        if not artifacts:
-            return {
-                'total': 0,
-                'by_type': {},
-                'avg_importance': 0.0,
-            }
-        
-        by_type = defaultdict(int)
-        for artifact in artifacts:
-            by_type[artifact.type] += 1
-        
-        return {
-            'total': len(artifacts),
-            'by_type': dict(by_type),
-            'avg_importance': sum(a.importance_score for a in artifacts) / len(artifacts),
-            'max_importance': max(a.importance_score for a in artifacts),
-            'min_importance': min(a.importance_score for a in artifacts),
-        }
+    def get_classification_stats(self) -> Dict:
+        """Get statistics about classifications."""
+        return self.hybrid_classifier.get_statistics()
 
 
 __all__ = [

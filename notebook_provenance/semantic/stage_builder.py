@@ -46,25 +46,29 @@ class PipelineStageBuilder:
         self.llm_analyzer = llm_analyzer
     
     def build_stages(self, parsed_cells: List[ParsedCell], 
-                    artifacts: List[DataArtifact],
-                    cell_dependencies: Dict[str, CellDependency]) -> List[PipelineStageNode]:
+                artifacts: List[DataArtifact],
+                cell_dependencies: Dict[str, CellDependency]) -> List[PipelineStageNode]:
         """
-        Build pipeline stages from cells.
-        
-        Args:
-            parsed_cells: List of ParsedCell objects
-            artifacts: List of identified data artifacts
-            cell_dependencies: Cell dependency information
-            
-        Returns:
-            List of PipelineStageNode objects
+        Build pipeline stages with better error handling.
         """
-        # Convert ParsedCell objects to dicts for LLM analyzer
+        # Convert to dicts
         cell_dicts = [self._parsed_cell_to_dict(cell) for cell in parsed_cells]
         
-        # Use LLM to detect stage boundaries
+        # Use LLM to detect stages (with error handling)
         if self.llm_analyzer and self.llm_analyzer.enabled:
-            stage_groups = self.llm_analyzer.detect_pipeline_stages(cell_dicts)
+            try:
+                stage_groups = self.llm_analyzer.detect_pipeline_stages(cell_dicts)
+                
+                # Validate response
+                if not stage_groups or not isinstance(stage_groups, list):
+                    print("  ⚠ LLM returned invalid stage data, using heuristics")
+                    stage_groups = self._heuristic_stage_detection(parsed_cells)
+            except json.JSONDecodeError as e:
+                print(f"  ⚠ LLM stage detection failed (JSON error): {e}")
+                stage_groups = self._heuristic_stage_detection(parsed_cells)
+            except Exception as e:
+                print(f"  ⚠ LLM stage detection failed: {e}")
+                stage_groups = self._heuristic_stage_detection(parsed_cells)
         else:
             stage_groups = self._heuristic_stage_detection(parsed_cells)
         

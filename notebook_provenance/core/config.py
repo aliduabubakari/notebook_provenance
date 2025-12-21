@@ -9,6 +9,7 @@ This module provides:
 - LLMConfig: LLM-specific configuration
 - VisualizationConfig: Visualization settings
 - EvaluationConfig: Evaluation framework settings
+- ClassificationConfig: Artifact classification settings (NEW)
 """
 
 from dataclasses import dataclass, field, asdict
@@ -55,6 +56,48 @@ class LLMConfig:
         """Convert to dictionary (excluding sensitive data)"""
         data = asdict(self)
         data['api_key'] = '***' if self.api_key else None
+        return data
+
+
+@dataclass
+class ClassificationConfig:
+    """
+    Configuration for artifact classification.
+    
+    This controls the hybrid LLM + embedding approach for identifying
+    and classifying data artifacts.
+    
+    Attributes:
+        use_llm: Whether to use LLM for classification
+        use_embeddings: Whether to use embedding-based similarity
+        use_semantic_deduplication: Whether to deduplicate semantically similar variables
+        embedding_model: Model to use for embeddings
+        similarity_threshold: Threshold for considering variables equivalent (0-1)
+        llm_confidence_threshold: Use LLM if pattern confidence below this
+        cache_classifications: Whether to cache classifications
+        cache_path: Path to cache file
+        min_importance: Minimum importance score to include artifact
+    """
+    use_llm: bool = True
+    use_embeddings: bool = True
+    use_semantic_deduplication: bool = True
+    embedding_model: str = "text-embedding-3-small"
+    similarity_threshold: float = 0.85
+    llm_confidence_threshold: float = 0.9
+    cache_classifications: bool = True
+    cache_path: Optional[Path] = None
+    min_importance: float = 5.0
+    
+    def __post_init__(self):
+        """Initialize cache path if enabled."""
+        if self.cache_classifications and self.cache_path is None:
+            self.cache_path = Path("classification_cache.json")
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        data = asdict(self)
+        if self.cache_path:
+            data['cache_path'] = str(self.cache_path)
         return data
 
 
@@ -171,6 +214,7 @@ class Config:
     
     Attributes:
         llm: LLM configuration
+        classification: Artifact classification configuration (NEW)
         visualization: Visualization configuration
         evaluation: Evaluation configuration
         parsing: Parsing configuration
@@ -179,6 +223,7 @@ class Config:
         verbose: Verbosity level
     """
     llm: LLMConfig = field(default_factory=LLMConfig)
+    classification: ClassificationConfig = field(default_factory=ClassificationConfig)
     visualization: VisualizationConfig = field(default_factory=VisualizationConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     parsing: ParsingConfig = field(default_factory=ParsingConfig)
@@ -196,11 +241,17 @@ class Config:
         if self.evaluation.enabled and self.evaluation.output_path:
             self.evaluation.output_path = Path(self.evaluation.output_path)
             self.evaluation.output_path.mkdir(parents=True, exist_ok=True)
+        
+        # Link classification to LLM config
+        if not self.llm.enabled:
+            self.classification.use_llm = False
+            self.classification.use_embeddings = False
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
         return {
             'llm': self.llm.to_dict(),
+            'classification': self.classification.to_dict(),
             'visualization': self.visualization.to_dict(),
             'evaluation': self.evaluation.to_dict(),
             'parsing': self.parsing.to_dict(),
@@ -224,6 +275,7 @@ class Config:
         
         return cls(
             llm=LLMConfig(**data.get('llm', {})),
+            classification=ClassificationConfig(**data.get('classification', {})),
             visualization=VisualizationConfig(**data.get('visualization', {})),
             evaluation=EvaluationConfig(**data.get('evaluation', {})),
             parsing=ParsingConfig(**data.get('parsing', {})),
@@ -237,6 +289,7 @@ class Config:
         """Create configuration from dictionary"""
         return cls(
             llm=LLMConfig(**data.get('llm', {})),
+            classification=ClassificationConfig(**data.get('classification', {})),
             visualization=VisualizationConfig(**data.get('visualization', {})),
             evaluation=EvaluationConfig(**data.get('evaluation', {})),
             parsing=ParsingConfig(**data.get('parsing', {})),
@@ -261,6 +314,8 @@ def get_config_from_env() -> Config:
         PROVENANCE_OUTPUT_DIR: Output directory
         PROVENANCE_VERBOSE: Verbosity (true/false)
         PROVENANCE_DPI: DPI for visualizations
+        PROVENANCE_USE_EMBEDDINGS: Use embeddings (true/false)
+        PROVENANCE_SIMILARITY_THRESHOLD: Similarity threshold (0-1)
     """
     config = Config()
     
@@ -284,6 +339,13 @@ def get_config_from_env() -> Config:
     if os.getenv('PROVENANCE_DPI'):
         config.visualization.dpi = int(os.getenv('PROVENANCE_DPI'))
     
+    # Classification
+    if os.getenv('PROVENANCE_USE_EMBEDDINGS'):
+        config.classification.use_embeddings = os.getenv('PROVENANCE_USE_EMBEDDINGS').lower() == 'true'
+    
+    if os.getenv('PROVENANCE_SIMILARITY_THRESHOLD'):
+        config.classification.similarity_threshold = float(os.getenv('PROVENANCE_SIMILARITY_THRESHOLD'))
+    
     return config
 
 
@@ -291,6 +353,7 @@ def get_config_from_env() -> Config:
 __all__ = [
     "Config",
     "LLMConfig",
+    "ClassificationConfig",
     "VisualizationConfig",
     "EvaluationConfig",
     "ParsingConfig",

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional, List
 
 from notebook_provenance import __version__
+from notebook_provenance.core.config import ClassificationConfig
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -65,6 +66,12 @@ Examples:
         'analyze',
         help='Analyze a notebook and extract provenance',
         formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    # Add this argument to analyze_parser
+    analyze_parser.add_argument(
+        '--no-llm-classification',
+        action='store_true',
+        help='Disable LLM for artifact classification (use patterns only)'
     )
     
     analyze_parser.add_argument(
@@ -309,6 +316,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             api_key=args.api_key,
             base_url=args.base_url,
             model=args.model,
+        ),
+        classification=ClassificationConfig(
+            use_llm=use_llm and not args.no_llm_classification,  # NEW
+            use_embeddings=use_llm and not args.no_llm_classification,  # NEW
+            use_semantic_deduplication=False,  # Disable for now
         ),
         visualization=VisualizationConfig(
             enabled=not args.no_visualizations,

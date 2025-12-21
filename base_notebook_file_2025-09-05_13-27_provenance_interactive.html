@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Notebook Provenance - Interactive</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="https://unpkg.com/vis-network@9.1.2/dist/vis-network.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; 
+            background: #f5f5f5; 
+            color: #333;
+        }
+        .header { 
+            background: white; 
+            padding: 20px; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
+        }
+        h1 { color: #333; margin-bottom: 10px; }
+        .stats { 
+            background: white; 
+            padding: 15px 20px; 
+            margin-top: 2px; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
+            gap: 20px; 
+        }
+        .stat { display: flex; flex-direction: column; }
+        .stat-label { color: #666; font-size: 14px; margin-bottom: 5px; }
+        .stat-value { color: #333; font-size: 24px; font-weight: bold; }
+        .controls { 
+            background: white; 
+            padding: 15px 20px; 
+            margin-top: 2px; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
+            display: flex; 
+            gap: 15px; 
+            align-items: center; 
+            flex-wrap: wrap; 
+        }
+        .control-group { display: flex; align-items: center; gap: 8px; }
+        label { font-weight: 500; color: #666; }
+        select, input[type="text"], button { 
+            padding: 8px 12px; 
+            border: 1px solid #ddd; 
+            border-radius: 4px; 
+            font-size: 14px; 
+        }
+        button { 
+            background: #3498DB; 
+            color: white; 
+            border: none; 
+            cursor: pointer; 
+            font-weight: 500; 
+            transition: background 0.2s;
+        }
+        button:hover { background: #2980B9; }
+        #mynetwork { 
+            width: 100%; 
+            height: calc(100vh - 280px); 
+            border: 1px solid #ddd; 
+            background: white; 
+            margin-top: 2px; 
+        }
+        .legend { 
+            background: white; 
+            padding: 15px 20px; 
+            margin-top: 2px; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1); 
+        }
+        .legend-items { display: flex; gap: 20px; flex-wrap: wrap; }
+        .legend-item { display: flex; align-items: center; gap: 8px; }
+        .legend-color { 
+            width: 20px; 
+            height: 20px; 
+            border-radius: 4px; 
+            border: 2px solid #333; 
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🔍 Notebook Data Provenance</h1>
+        <p>Interactive visualization of data flow and transformations</p>
+    </div>
+    
+    <div class="stats">
+        <div class="stat">
+            <span class="stat-label">Pipeline Stages</span>
+            <span class="stat-value">0</span>
+        </div>
+        <div class="stat">
+            <span class="stat-label">Data Artifacts</span>
+            <span class="stat-value">23</span>
+        </div>
+        <div class="stat">
+            <span class="stat-label">Transformations</span>
+            <span class="stat-value">0</span>
+        </div>
+        <div class="stat">
+            <span class="stat-label">Graph Nodes</span>
+            <span class="stat-value">39</span>
+        </div>
+        <div class="stat">
+            <span class="stat-label">Noise Reduction</span>
+            <span class="stat-value">61%</span>
+        </div>
+    </div>
+    
+    <div class="controls">
+        <div class="control-group">
+            <label for="filterType">Filter by Type:</label>
+            <select id="filterType">
+                <option value="all">All Nodes</option>
+                <option value="data_artifact">Data Artifacts Only</option>
+                <option value="function_call">Functions Only</option>
+                <option value="variable">Variables Only</option>
+            </select>
+        </div>
+        <div class="control-group">
+            <label for="searchNode">Search:</label>
+            <input type="text" id="searchNode" placeholder="Node name..." />
+        </div>
+        <button onclick="network.fit()">Reset View</button>
+        <button onclick="exportGraph()">Export as PNG</button>
+        <button onclick="togglePhysics()">Toggle Physics</button>
+    </div>
+    
+    <div id="mynetwork"></div>
+    
+    <div class="legend">
+        <h3 style="margin-bottom: 10px;">Legend</h3>
+        <div class="legend-items">
+            <div class="legend-item">
+                <div class="legend-color" style="background: #2ECC71;"></div>
+                <span>Data Artifact</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #E74C3C;"></div>
+                <span>Function Call</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #3498DB;"></div>
+                <span>Variable</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #F39C12;"></div>
+                <span>Intermediate</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #9B59B6;"></div>
+                <span>Attribute Access</span>
+            </div>
+        </div>
+    </div>
+    
+    <script type="text/javascript">
+        // Data
+        const allNodes = [{"id": "var_dataset_id_26", "label": "dataset_id", "title": "<b>data_artifact</b><br>dataset_id<br><br><code>dataset_id</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "var_table_name_28", "label": "table_name", "title": "<b>data_artifact</b><br>table_name<br><br><code>table_name</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "func_29", "label": "pd.read_csv", "title": "<b>function_call</b><br>pd.read_csv<br><br><code>pd.read_csv('./table_1.csv')</code>", "color": "#E74C3C", "shape": "ellipse", "size": 25, "group": "function_call"}, {"id": "var_df_30", "label": "df", "title": "<b>data_artifact</b><br>df<br><br><code>df</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "var_df_33", "label": "df", "title": "<b>data_artifact</b><br>df<br><br><code>df</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "intermediate_37", "label": "table_id (from tuple", "title": "<b>intermediate</b><br>table_id (from tuple[0])<br><br><code>table_id = ...[0]</code>", "color": "#F39C12", "shape": "diamond", "size": 18, "group": "intermediate"}, {"id": "var_table_id_38", "label": "table_id", "title": "<b>data_artifact</b><br>table_id<br><br><code>table_id</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "intermediate_41", "label": "table_data (from tup", "title": "<b>intermediate</b><br>table_data (from tuple[2])<br><br><code>table_data = ...[2]</code>", "color": "#F39C12", "shape": "diamond", "size": 18, "group": "intermediate"}, {"id": "var_table_data_42", "label": "table_data", "title": "<b>data_artifact</b><br>table_data<br><br><code>table_data</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "var_table_data_47", "label": "table_data", "title": "<b>data_artifact</b><br>table_data<br><br><code>table_data</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "intermediate_49", "label": "reconciled_table (fr", "title": "<b>intermediate</b><br>reconciled_table (from tuple[0])<br><br><code>reconciled_table = ...[0]</code>", "color": "#F39C12", "shape": "diamond", "size": 18, "group": "intermediate"}, {"id": "var_reconciled_table_50", "label": "reconciled_table", "title": "<b>data_artifact</b><br>reconciled_table<br><br><code>reconciled_table</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "intermediate_51", "label": "backend_payload (fro", "title": "<b>intermediate</b><br>backend_payload (from tuple[1])<br><br><code>backend_payload = ...[1]</code>", "color": "#F39C12", "shape": "diamond", "size": 18, "group": "intermediate"}, {"id": "var_backend_payload_52", "label": "backend_payload", "title": "<b>variable</b><br>backend_payload<br><br><code>backend_payload</code>", "color": "#3498DB", "shape": "ellipse", "size": 20, "group": "variable"}, {"id": "var_payload_53", "label": "payload", "title": "<b>variable</b><br>payload<br><br><code>payload</code>", "color": "#3498DB", "shape": "ellipse", "size": 20, "group": "variable"}, {"id": "intermediate_57", "label": "sentPayload (from tu", "title": "<b>intermediate</b><br>sentPayload (from tuple[1])<br><br><code>sentPayload = ...[1]</code>", "color": "#F39C12", "shape": "diamond", "size": 18, "group": "intermediate"}, {"id": "var_sentPayload_58", "label": "sentPayload", "title": "<b>variable</b><br>sentPayload<br><br><code>sentPayload</code>", "color": "#3498DB", "shape": "ellipse", "size": 20, "group": "variable"}, {"id": "var_html_table_61", "label": "html_table", "title": "<b>data_artifact</b><br>html_table<br><br><code>html_table</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "var_html_table_63", "label": "html_table", "title": "<b>data_artifact</b><br>html_table<br><br><code>html_table</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "var_table_data_65", "label": "table_data", "title": "<b>data_artifact</b><br>table_data<br><br><code>table_data</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "intermediate_67", "label": "extended_table (from", "title": "<b>intermediate</b><br>extended_table (from tuple[0])<br><br><code>extended_table = ...[0]</code>", "color": "#F39C12", "shape": "diamond", "size": 18, "group": "intermediate"}, {"id": "var_extended_table_68", "label": "extended_table", "title": "<b>data_artifact</b><br>extended_table<br><br><code>extended_table</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "intermediate_69", "label": "extension_payload (f", "title": "<b>intermediate</b><br>extension_payload (from tuple[1])<br><br><code>extension_payload = ...[1]</code>", "color": "#F39C12", "shape": "diamond", "size": 18, "group": "intermediate"}, {"id": "var_extension_payload_70", "label": "extension_payload", "title": "<b>variable</b><br>extension_payload<br><br><code>extension_payload</code>", "color": "#3498DB", "shape": "ellipse", "size": 20, "group": "variable"}, {"id": "var_payload_71", "label": "payload", "title": "<b>variable</b><br>payload<br><br><code>payload</code>", "color": "#3498DB", "shape": "ellipse", "size": 20, "group": "variable"}, {"id": "intermediate_75", "label": "sentPayload (from tu", "title": "<b>intermediate</b><br>sentPayload (from tuple[1])<br><br><code>sentPayload = ...[1]</code>", "color": "#F39C12", "shape": "diamond", "size": 18, "group": "intermediate"}, {"id": "var_sentPayload_76", "label": "sentPayload", "title": "<b>variable</b><br>sentPayload<br><br><code>sentPayload</code>", "color": "#3498DB", "shape": "ellipse", "size": 20, "group": "variable"}, {"id": "var_html_table_79", "label": "html_table", "title": "<b>data_artifact</b><br>html_table<br><br><code>html_table</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "var_html_table_81", "label": "html_table", "title": "<b>data_artifact</b><br>html_table<br><br><code>html_table</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "var_table_data_83", "label": "table_data", "title": "<b>data_artifact</b><br>table_data<br><br><code>table_data</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "intermediate_85", "label": "extended_table (from", "title": "<b>intermediate</b><br>extended_table (from tuple[0])<br><br><code>extended_table = ...[0]</code>", "color": "#F39C12", "shape": "diamond", "size": 18, "group": "intermediate"}, {"id": "var_extended_table_86", "label": "extended_table", "title": "<b>data_artifact</b><br>extended_table<br><br><code>extended_table</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "intermediate_87", "label": "extension_payload (f", "title": "<b>intermediate</b><br>extension_payload (from tuple[1])<br><br><code>extension_payload = ...[1]</code>", "color": "#F39C12", "shape": "diamond", "size": 18, "group": "intermediate"}, {"id": "var_extension_payload_88", "label": "extension_payload", "title": "<b>variable</b><br>extension_payload<br><br><code>extension_payload</code>", "color": "#3498DB", "shape": "ellipse", "size": 20, "group": "variable"}, {"id": "var_payload_89", "label": "payload", "title": "<b>variable</b><br>payload<br><br><code>payload</code>", "color": "#3498DB", "shape": "ellipse", "size": 20, "group": "variable"}, {"id": "intermediate_93", "label": "sentPayload (from tu", "title": "<b>intermediate</b><br>sentPayload (from tuple[1])<br><br><code>sentPayload = ...[1]</code>", "color": "#F39C12", "shape": "diamond", "size": 18, "group": "intermediate"}, {"id": "var_sentPayload_94", "label": "sentPayload", "title": "<b>variable</b><br>sentPayload<br><br><code>sentPayload</code>", "color": "#3498DB", "shape": "ellipse", "size": 20, "group": "variable"}, {"id": "var_html_table_97", "label": "html_table", "title": "<b>data_artifact</b><br>html_table<br><br><code>html_table</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}, {"id": "var_html_table_99", "label": "html_table", "title": "<b>data_artifact</b><br>html_table<br><br><code>html_table</code>", "color": "#2ECC71", "shape": "box", "size": 30, "group": "data_artifact"}];
+        const allEdges = [{"from": "func_29", "to": "var_df_30", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "assign"}, {"from": "intermediate_37", "to": "var_table_id_38", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "data_flow"}, {"from": "intermediate_41", "to": "var_table_data_42", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "data_flow"}, {"from": "intermediate_49", "to": "var_reconciled_table_50", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "data_flow"}, {"from": "intermediate_51", "to": "var_backend_payload_52", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "data_flow"}, {"from": "var_backend_payload_52", "to": "var_payload_53", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "assign"}, {"from": "intermediate_57", "to": "var_sentPayload_58", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "data_flow"}, {"from": "intermediate_67", "to": "var_extended_table_68", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "data_flow"}, {"from": "intermediate_69", "to": "var_extension_payload_70", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "data_flow"}, {"from": "var_extension_payload_70", "to": "var_payload_71", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "assign"}, {"from": "intermediate_75", "to": "var_sentPayload_76", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "data_flow"}, {"from": "intermediate_85", "to": "var_extended_table_86", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "data_flow"}, {"from": "intermediate_87", "to": "var_extension_payload_88", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "data_flow"}, {"from": "var_extension_payload_88", "to": "var_payload_89", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "assign"}, {"from": "intermediate_93", "to": "var_sentPayload_94", "arrows": "to", "color": {"color": "#666", "opacity": 0.6}, "title": "data_flow"}];
+        
+        const nodes = new vis.DataSet(allNodes);
+        const edges = new vis.DataSet(allEdges);
+        
+        const container = document.getElementById('mynetwork');
+        const data = { nodes: nodes, edges: edges };
+        
+        let physicsEnabled = true;
+        
+        const options = {
+            physics: {
+                enabled: true,
+                solver: 'forceAtlas2Based',
+                forceAtlas2Based: {
+                    gravitationalConstant: -50,
+                    centralGravity: 0.01,
+                    springLength: 200,
+                    springConstant: 0.08
+                },
+                maxVelocity: 50,
+                stabilization: { iterations: 150 }
+            },
+            interaction: {
+                hover: true,
+                tooltipDelay: 100,
+                navigationButtons: true,
+                keyboard: true
+            },
+            nodes: {
+                font: { size: 14, face: 'Arial' },
+                borderWidth: 2,
+                shadow: true
+            },
+            edges: {
+                width: 2,
+                shadow: true,
+                smooth: { type: 'continuous' }
+            }
+        };
+        
+        const network = new vis.Network(container, data, options);
+        
+        // Filter functionality
+        document.getElementById('filterType').addEventListener('change', function(e) {
+            const filterValue = e.target.value;
+            if (filterValue === 'all') {
+                nodes.clear();
+                nodes.add(allNodes);
+                edges.clear();
+                edges.add(allEdges);
+            } else {
+                const filtered = allNodes.filter(n => n.group === filterValue);
+                const ids = new Set(filtered.map(n => n.id));
+                const filteredEdges = allEdges.filter(e => ids.has(e.from) && ids.has(e.to));
+                nodes.clear();
+                nodes.add(filtered);
+                edges.clear();
+                edges.add(filteredEdges);
+            }
+            network.fit();
+        });
+        
+        // Search functionality
+        document.getElementById('searchNode').addEventListener('input', function(e) {
+            const searchTerm = e.target.value.toLowerCase();
+            if (!searchTerm) {
+                allNodes.forEach(n => nodes.update({ id: n.id, color: n.color, borderWidth: 2 }));
+                return;
+            }
+            allNodes.forEach(n => {
+                const match = n.label.toLowerCase().includes(searchTerm);
+                nodes.update({
+                    id: n.id,
+                    color: match ? '#FFD700' : n.color,
+                    borderWidth: match ? 4 : 2
+                });
+            });
+            const m = allNodes.find(n => n.label.toLowerCase().includes(searchTerm));
+            if (m) network.focus(m.id, { scale: 1.5, animation: true });
+        });
+        
+        // Toggle physics
+        function togglePhysics() {
+            physicsEnabled = !physicsEnabled;
+            network.setOptions({ physics: { enabled: physicsEnabled } });
+        }
+        
+        // Export as PNG
+        function exportGraph() {
+            const canvas = document.querySelector('#mynetwork canvas');
+            const link = document.createElement('a');
+            link.download = 'provenance_graph.png';
+            link.href = canvas.toDataURL();
+            link.click();
+        }
+    </script>
+</body>
+</html>

@@ -11,7 +11,7 @@ This module provides the DynamicTaxonomy class which:
 - Persists learned knowledge
 """
 
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from collections import defaultdict
 from datetime import datetime
 import json

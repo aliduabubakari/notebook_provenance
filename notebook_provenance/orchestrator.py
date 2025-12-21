@@ -1,12 +1,8 @@
 """
-Orchestrator Module
-===================
+Orchestrator Module - UPDATED WITH HYBRID CLASSIFICATION
+=========================================================
 
-Main orchestrator that coordinates all components of the provenance system.
-
-This module provides:
-- NotebookProvenanceSystem: Main entry point for analysis
-- Coordinates parsing, graph building, semantic analysis, and visualization
+Main orchestrator with integrated hybrid artifact classification.
 """
 
 from typing import List, Dict, Optional, Any
@@ -35,6 +31,8 @@ from notebook_provenance.graph.column_lineage import ColumnLineageTracker
 
 from notebook_provenance.semantic.llm_analyzer import LLMSemanticAnalyzer
 from notebook_provenance.semantic.stage_builder import PipelineStageBuilder
+from notebook_provenance.semantic.artifact_classifier import HybridArtifactClassifier
+from notebook_provenance.semantic.deduplicator import SemanticDeduplicator
 
 from notebook_provenance.visualization.provenance_viz import ProvenanceVisualizer
 from notebook_provenance.visualization.interactive import InteractiveVisualizer
@@ -46,18 +44,7 @@ class NotebookProvenanceSystem:
     """
     Main orchestrator for notebook provenance extraction and analysis.
     
-    This class coordinates all components of the system:
-    - Code parsing
-    - Graph construction
-    - Semantic analysis
-    - Visualization
-    - Export
-    
-    Example:
-        >>> from notebook_provenance import NotebookProvenanceSystem
-        >>> system = NotebookProvenanceSystem(api_key="your_key")
-        >>> result = system.analyze_notebook(code_cells, cell_ids)
-        >>> system.save_all(result, prefix="output")
+    UPDATED: Now includes hybrid artifact classification and semantic deduplication.
     """
     
     def __init__(self, config: Optional[Config] = None,
@@ -75,12 +62,21 @@ class NotebookProvenanceSystem:
         """
         # Build config if not provided
         if config is None:
-            from notebook_provenance.core.config import LLMConfig, VisualizationConfig
+            from notebook_provenance.core.config import (
+                LLMConfig, 
+                VisualizationConfig,
+                ClassificationConfig
+            )
             config = Config(
                 llm=LLMConfig(
                     enabled=use_llm and api_key is not None,
                     api_key=api_key,
                     base_url=base_url,
+                ),
+                classification=ClassificationConfig(
+                    use_llm=use_llm and api_key is not None,
+                    use_embeddings=use_llm and api_key is not None,
+                    use_semantic_deduplication=use_llm and api_key is not None,
                 ),
                 visualization=VisualizationConfig(),
             )
@@ -102,9 +98,28 @@ class NotebookProvenanceSystem:
         self.llm_analyzer = None
         if self.config.llm.enabled:
             self.llm_analyzer = LLMSemanticAnalyzer(config=self.config.llm)
+            
+            if self.config.verbose:
+                print(f"✓ LLM enabled: {self.config.llm.model}")
         
-        # Artifact analysis
-        self.artifact_analyzer = DataArtifactAnalyzer(self.llm_analyzer)
+        # NEW: Hybrid artifact classifier
+        self.artifact_classifier = HybridArtifactClassifier(
+            llm_analyzer=self.llm_analyzer,
+            use_embeddings=self.config.classification.use_embeddings
+        )
+        
+        # NEW: Semantic deduplicator
+        self.deduplicator = SemanticDeduplicator(
+            llm_analyzer=self.llm_analyzer,
+            similarity_threshold=self.config.classification.similarity_threshold,
+            use_semantic_merge=self.config.classification.use_semantic_deduplication
+        )
+        
+        # Artifact analysis (now uses hybrid classifier)
+        self.artifact_analyzer = DataArtifactAnalyzer(
+            llm_analyzer=self.llm_analyzer,
+            use_embeddings=self.config.classification.use_embeddings
+        )
         
         # Transformation extraction
         self.transformation_extractor = TransformationExtractor(self.llm_analyzer)
@@ -125,7 +140,7 @@ class NotebookProvenanceSystem:
     def analyze_notebook(self, notebook_cells: List[str], 
                         cell_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         """
-        Complete notebook analysis pipeline.
+        Complete notebook analysis pipeline with hybrid classification.
         
         Args:
             notebook_cells: List of code cell contents
@@ -142,6 +157,9 @@ class NotebookProvenanceSystem:
         # Generate cell IDs if not provided
         if cell_ids is None:
             cell_ids = [f"cell_{i}" for i in range(len(notebook_cells))]
+        
+        # Create cell code mapping for context
+        cell_code_map = {cid: code for cid, code in zip(cell_ids, notebook_cells)}
         
         # ========== LAYER 1: PARSE CELLS ==========
         if self.config.verbose:
@@ -166,6 +184,23 @@ class NotebookProvenanceSystem:
         if self.config.verbose:
             print(f"  ✓ Raw DFG: {len(raw_dfg.nodes)} nodes, {len(raw_dfg.edges)} edges")
         
+        # NEW: Semantic deduplication
+        if self.config.classification.use_semantic_deduplication:
+            if self.config.verbose:
+                print(f"\n  [2.5] Semantic deduplication...")
+            
+            canonical_map = self.deduplicator.deduplicate(
+                raw_dfg.nodes,
+                verbose=self.config.verbose
+            )
+            
+            # Apply deduplication to DFG
+            raw_dfg = self._apply_deduplication(raw_dfg, canonical_map)
+            
+            if self.config.verbose:
+                dedup_stats = self.deduplicator.get_statistics()
+                print(f"  ✓ Deduplication: {dedup_stats}")
+        
         # Build clean DFG
         if self.config.graph.build_clean_dfg:
             clean_dfg = self.dfg_builder.build_clean_dfg(raw_dfg)
@@ -180,19 +215,35 @@ class NotebookProvenanceSystem:
         
         graph_time = time.time() - start_time
         
-        # ========== LAYER 3: SEMANTIC ANALYSIS ==========
+        # ========== LAYER 3: SEMANTIC ANALYSIS WITH HYBRID CLASSIFICATION ==========
         if self.config.verbose:
-            print("\n[Layer 3] Performing semantic analysis...")
+            print("\n[Layer 3] Semantic analysis with hybrid classification...")
         
         start_time = time.time()
         
-        # Identify artifacts
-        artifacts = self.artifact_analyzer.identify_artifacts(raw_dfg, cell_dependencies)
+        # Identify artifacts using hybrid classifier
+        artifacts = self.artifact_analyzer.identify_artifacts(
+            raw_dfg, 
+            cell_dependencies,
+            code_cells=cell_code_map
+        )
         
         if self.config.verbose:
             print(f"  ✓ Identified {len(artifacts)} data artifacts")
+            
+            # Show classification statistics
+            if hasattr(self.artifact_analyzer, 'hybrid_classifier'):
+                class_stats = self.artifact_analyzer.hybrid_classifier.get_statistics()
+                print(f"  Classification sources:")
+                for source, count in class_stats.get('by_source', {}).items():
+                    pct = class_stats['percentages'].get(source, 0)
+                    print(f"    - {source}: {count} ({pct:.1f}%)")
+            
+            # Show top artifacts
             for artifact in artifacts[:5]:
                 print(f"    - {artifact.name} ({artifact.type}, importance: {artifact.importance_score:.1f})")
+                if self.config.verbose and 'reasoning' in artifact.metadata:
+                    print(f"      Reason: {artifact.metadata['reasoning']}")
             if len(artifacts) > 5:
                 print(f"    ... and {len(artifacts) - 5} more")
         
@@ -218,7 +269,6 @@ class NotebookProvenanceSystem:
         if self.config.verbose:
             print("\n[Layer 3.5] Extracting column-level lineage...")
         
-        # Convert ParsedCell objects to dicts for column tracker
         parsed_cell_dicts = [
             {
                 'cell_id': cell.cell_id,
@@ -281,7 +331,8 @@ class NotebookProvenanceSystem:
                 'parse_time': parse_time,
                 'graph_time': graph_time,
                 'semantic_time': semantic_time,
-            }
+            },
+            'classification_stats': self.artifact_analyzer.get_classification_stats() if hasattr(self.artifact_analyzer, 'get_classification_stats') else {}
         }
         
         if self.config.verbose:
@@ -290,6 +341,51 @@ class NotebookProvenanceSystem:
             print("=" * 80)
         
         return result
+    
+    def _apply_deduplication(self, dfg: DataFlowGraph, 
+                           canonical_map: Dict[str, str]) -> DataFlowGraph:
+        """
+        Apply deduplication mapping to DFG.
+        
+        Args:
+            dfg: Original data flow graph
+            canonical_map: Mapping from node_id to canonical node_id
+            
+        Returns:
+            Deduplicated data flow graph
+        """
+        new_dfg = DataFlowGraph()
+        new_dfg.metadata = dfg.metadata.copy()
+        
+        # Add canonical nodes only
+        canonical_nodes = set(canonical_map.values())
+        for node_id in canonical_nodes:
+            if node_id in dfg.nodes:
+                new_dfg.add_node(dfg.nodes[node_id])
+        
+        # Add edges, mapping to canonical IDs
+        for edge in dfg.edges:
+            from_canonical = canonical_map.get(edge.from_node, edge.from_node)
+            to_canonical = canonical_map.get(edge.to_node, edge.to_node)
+            
+            # Only add if both nodes exist and it's not a self-loop
+            if (from_canonical in new_dfg.nodes and 
+                to_canonical in new_dfg.nodes and 
+                from_canonical != to_canonical):
+                
+                # Create new edge with canonical IDs
+                from notebook_provenance.core.data_structures import DFGEdge
+                new_edge = DFGEdge(
+                    from_node=from_canonical,
+                    to_node=to_canonical,
+                    edge_type=edge.edge_type,
+                    weight=edge.weight,
+                    operation=edge.operation,
+                    metadata=edge.metadata
+                )
+                new_dfg.add_edge(new_edge)
+        
+        return new_dfg
     
     def save_all(self, result: Dict, prefix: str = "provenance"):
         """
@@ -329,6 +425,18 @@ class NotebookProvenanceSystem:
             except Exception as e:
                 print(f"  ⚠ Failed to create interactive HTML: {e}")
         
+        # Save classification cache if enabled
+        if (self.config.classification.cache_classifications and 
+            self.config.classification.cache_path and
+            hasattr(self.artifact_analyzer, 'hybrid_classifier')):
+            try:
+                cache_path = str(self.config.classification.cache_path)
+                self.artifact_analyzer.hybrid_classifier.save_cache(cache_path)
+                if self.config.verbose:
+                    print(f"  ✓ Saved classification cache to {cache_path}")
+            except Exception as e:
+                print(f"  ⚠ Failed to save classification cache: {e}")
+        
         if self.config.verbose:
             print("\n✅ All outputs saved successfully!")
     
@@ -366,24 +474,37 @@ def analyze_notebook_file(notebook_path: str,
                          api_key: Optional[str] = None,
                          output_prefix: Optional[str] = None,
                          use_llm: bool = True,
+                         use_embeddings: bool = True,
                          save_outputs: bool = True) -> Dict[str, Any]:
     """
-    Convenience function to analyze a notebook file.
+    Convenience function to analyze a notebook file with hybrid classification.
     
     Args:
         notebook_path: Path to .ipynb or .py file
         api_key: API key for LLM (optional)
         output_prefix: Prefix for output files (optional)
         use_llm: Whether to use LLM (default: True if api_key provided)
+        use_embeddings: Whether to use embedding-based similarity
         save_outputs: Whether to save outputs (default: True)
     
     Returns:
         Analysis result dictionary
     """
-    system = NotebookProvenanceSystem(
-        api_key=api_key,
-        use_llm=use_llm and api_key is not None
+    from notebook_provenance.core.config import Config, LLMConfig, ClassificationConfig
+    
+    config = Config(
+        llm=LLMConfig(
+            enabled=use_llm and api_key is not None,
+            api_key=api_key
+        ),
+        classification=ClassificationConfig(
+            use_llm=use_llm and api_key is not None,
+            use_embeddings=use_embeddings and api_key is not None,
+            use_semantic_deduplication=use_embeddings and api_key is not None,
+        )
     )
+    
+    system = NotebookProvenanceSystem(config=config)
     
     return system.analyze_file(
         notebook_path,

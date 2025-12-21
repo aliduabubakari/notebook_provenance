@@ -14,6 +14,7 @@ This module provides the TransformationExtractor class which:
 from typing import Dict, List, Optional, Set
 import networkx as nx
 
+from notebook_provenance import NodeType
 from notebook_provenance.core.data_structures import (
     DataFlowGraph,
     DataArtifact,
@@ -47,81 +48,120 @@ class TransformationExtractor:
         self.transformations = []
     
     def extract_transformations(self, dfg: DataFlowGraph, 
-                               artifacts: List[DataArtifact],
-                               parsed_cells: List[ParsedCell]) -> List[Transformation]:
+                           artifacts: List[DataArtifact],
+                           parsed_cells: List['ParsedCell']) -> List[Transformation]:
         """
-        Extract transformations between artifacts.
+        Extract ONLY direct transformations between artifacts.
         
-        Args:
-            dfg: Data flow graph
-            artifacts: List of data artifacts
-            parsed_cells: List of parsed cells
-            
-        Returns:
-            List of Transformation objects
+        FIXED: Don't create transformations between all pairs.
+        Only when there's a clear function creating one artifact from another.
         """
         transformations = []
-        artifact_map = {a.id: a for a in artifacts}
+        artifact_set = {a.id for a in artifacts}
+        artifact_by_name = {a.name: a for a in artifacts}
         
-        # Build a mapping of cells to their code
-        cell_code_map = {cell.cell_id: cell for cell in parsed_cells if not cell.error}
+        # Map of cell_id to parsed cell
+        cell_map = {cell.cell_id: cell for cell in parsed_cells if not cell.error}
         
-        # Find paths between artifacts
-        for i, source_artifact in enumerate(artifacts):
-            for target_artifact in artifacts[i+1:]:
-                # Check if there's a path
-                path = self._find_path(dfg, source_artifact.id, target_artifact.id)
-                
-                if path:
-                    # Extract operations along the path
-                    operations = self._extract_operations_from_path(dfg, path)
-                    
-                    # Skip if no meaningful operations
-                    if not operations:
-                        continue
-                    
-                    # Find the cell where transformation happens
-                    transform_cell = target_artifact.created_in_cell
-                    
-                    # Get code snippet
-                    cell_info = cell_code_map.get(transform_cell)
-                    code_snippet = cell_info.code[:500] if cell_info else ''
-                    
-                    # Get function calls
-                    function_calls = [op for op in operations if op]
-                    
-                    # Generate description
-                    description = self._generate_description(
-                        source_artifact.name,
-                        target_artifact.name,
-                        function_calls,
-                        code_snippet
-                    )
-                    
-                    # Determine semantic type
-                    semantic_type = self._classify_transformation(function_calls)
-                    
-                    transformation = Transformation(
-                        id=f"trans_{len(transformations)}",
-                        operation=function_calls[0] if function_calls else "transform",
-                        source_artifacts=[source_artifact.id],
-                        target_artifact=target_artifact.id,
-                        function_calls=function_calls,
-                        cell_id=transform_cell,
-                        description=description,
-                        semantic_type=semantic_type
-                    )
-                    
-                    transformations.append(transformation)
-        
-        # Also check for multi-source transformations (joins, merges, etc.)
-        multi_source_transforms = self._extract_multi_source_transformations(
-            dfg, artifacts, cell_code_map
-        )
-        transformations.extend(multi_source_transforms)
+        for artifact in artifacts:
+            # Skip if no creation info
+            created_by = artifact.metadata.get('created_by')
+            if not created_by:
+                continue
+            
+            # Find what artifacts were inputs to the creating function
+            source_artifacts = self._find_source_artifacts(
+                dfg, artifact, artifacts, created_by
+            )
+            
+            if not source_artifacts:
+                # Check if this is from file load
+                if any(f in created_by.lower() for f in ['read_', 'load', 'fetch']):
+                    # This is a source artifact, no transformation needed
+                    continue
+            
+            # Create transformation
+            trans = Transformation(
+                id=f"trans_{len(transformations)}",
+                operation=created_by,
+                source_artifacts=[s.id for s in source_artifacts],
+                target_artifact=artifact.id,
+                function_calls=[created_by],
+                cell_id=artifact.created_in_cell,
+                description=self._generate_description(
+                    source_artifacts, artifact, created_by
+                ),
+                semantic_type=self._classify_transformation([created_by])
+            )
+            
+            transformations.append(trans)
         
         self.transformations = transformations
         return transformations
+
+    def _find_source_artifacts(self, dfg: DataFlowGraph, 
+                            target_artifact: DataArtifact,
+                            all_artifacts: List[DataArtifact],
+                            creating_function: str) -> List[DataArtifact]:
+        """
+        Find artifacts that were inputs to the function that created target.
+        """
+        sources = []
+        artifact_names = {a.name for a in all_artifacts}
+        artifact_by_name = {a.name: a for a in all_artifacts}
+        
+        # Find the function call node
+        for node_id, node in dfg.nodes.items():
+            if (node.node_type == NodeType.FUNCTION_CALL and 
+                node.label == creating_function and
+                node.cell_id == target_artifact.created_in_cell):
+                
+                # Find inputs to this function
+                for edge in dfg.edges:
+                    if edge.to_node == node_id:
+                        source_node = dfg.get_node(edge.from_node)
+                        if source_node and source_node.label in artifact_names:
+                            source_artifact = artifact_by_name.get(source_node.label)
+                            if source_artifact and source_artifact.id != target_artifact.id:
+                                sources.append(source_artifact)
+                break
+        
+        return sources
+
+    def _generate_description(self, sources: List[DataArtifact],
+                            target: DataArtifact,
+                            function: str) -> str:
+        """Generate human-readable transformation description."""
+        func_lower = function.lower()
+        
+        # Function-based descriptions
+        if 'read_csv' in func_lower:
+            return f"Load {target.name} from CSV file"
+        if 'read_' in func_lower:
+            return f"Load {target.name} from file"
+        if 'add_table' in func_lower:
+            if sources:
+                return f"Store {sources[0].name} in table manager"
+            return f"Create table {target.name}"
+        if 'get_table' in func_lower:
+            return f"Retrieve table data"
+        if 'reconcile' in func_lower:
+            if sources:
+                return f"Reconcile {sources[0].name}"
+            return f"Reconcile table data"
+        if 'extend' in func_lower:
+            if sources:
+                return f"Extend {sources[0].name} with additional data"
+            return f"Extend table with additional data"
+        if 'merge' in func_lower or 'join' in func_lower:
+            if len(sources) >= 2:
+                return f"Merge {sources[0].name} and {sources[1].name}"
+            return f"Merge data"
+        
+        # Generic
+        if sources:
+            return f"Transform {sources[0].name} → {target.name}"
+        return f"Create {target.name}"
     
     def _find_path(self, dfg: DataFlowGraph, source_id: str, target_id: str) -> Optional[List[str]]:
         """
@@ -161,38 +201,6 @@ class TransformationExtractor:
                 operations.append(node.label)
         
         return operations
-    
-    def _generate_description(self, source_name: str, target_name: str,
-                             function_calls: List[str], code_snippet: str) -> str:
-        """
-        Generate human-readable description of transformation.
-        
-        Args:
-            source_name: Source artifact name
-            target_name: Target artifact name
-            function_calls: List of function calls
-            code_snippet: Code snippet
-            
-        Returns:
-            Description string
-        """
-        # Use LLM if available
-        if self.llm_analyzer and self.llm_analyzer.enabled:
-            try:
-                return self.llm_analyzer.describe_transformation(
-                    source_name,
-                    target_name,
-                    function_calls,
-                    code_snippet
-                )
-            except Exception as e:
-                print(f"Warning: LLM description failed: {e}")
-                # Fall through to heuristic
-        
-        # Heuristic description
-        return self._heuristic_describe_transformation(
-            source_name, target_name, function_calls
-        )
     
     def _heuristic_describe_transformation(self, source_name: str, 
                                           target_name: str,
